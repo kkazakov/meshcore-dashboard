@@ -1,0 +1,46 @@
+meta {
+  name: Login
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{base_url}}/api/login
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "email": "admin",
+    "password": "admin"
+  }
+}
+
+script:post-response {
+  // Store the returned token in the environment so subsequent requests
+  // can reference it via {{auth_token}}.  The token is held in Bruno's
+  // in-memory environment only — it is never written to disk.
+  if (res.status === 200 && res.body.token) {
+    bru.setEnvVar("auth_token", res.body.token);
+    console.log("Token saved to env var auth_token");
+  }
+}
+
+tests {
+  test("status 200", function() {
+    expect(res.status).to.equal(200);
+  });
+
+  test("token is present and non-empty", function() {
+    expect(res.body.token).to.be.a("string").and.to.have.length.greaterThan(0);
+  });
+
+  test("email returned matches login", function() {
+    expect(res.body.email).to.equal("admin");
+  });
+
+  test("username present", function() {
+    expect(res.body.username).to.be.a("string");
+  });
+}

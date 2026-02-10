@@ -11,6 +11,7 @@ clickhouse-connect>=0.8.0
 # Config / utilities
 python-dotenv>=1.0.0
 pydantic-settings>=2.0.0
+bcrypt>=4.0.0
 
 # Testing
 pytest>=8.0.0
