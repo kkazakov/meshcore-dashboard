@@ -1,13 +1,11 @@
 """
-GET /api/channels — list channels configured on the connected companion device.
+GET  /api/channels — list channels configured on the connected companion device.
+POST /api/channels — create a new channel on the next free slot.
 
 Authentication
 --------------
-Requires a valid ``x-api-token`` header obtained from ``POST /api/login``.
-
-The endpoint connects to the local MeshCore companion device, fetches each
-channel by index (starting at 0) until the device returns an error or no
-response, and returns the full list.
+Both endpoints require a valid ``x-api-token`` header obtained from
+``POST /api/login``.
 
 Each channel entry contains:
 - ``index``        : channel slot index on the device
@@ -34,6 +32,9 @@ router = APIRouter()
 _MAX_CHANNEL_SLOTS = 8
 
 
+# ── Pydantic models ───────────────────────────────────────────────────────────
+
+
 class ChannelInfo(BaseModel):
     index: int
     name: str
@@ -45,6 +46,64 @@ class ChannelsResponse(BaseModel):
     channels: list[ChannelInfo]
 
 
+class CreateChannelRequest(BaseModel):
+    name: str
+    password: str | None = None
+
+
+# ── Internal helpers ──────────────────────────────────────────────────────────
+
+
+def _is_empty_slot(name: str, secret_hex: str) -> bool:
+    """Return True for uninitialised device slots (blank name + zero secret)."""
+    return not name and all(c == "0" for c in secret_hex)
+
+
+async def _fetch_all_channels(meshcore: Any) -> list[dict[str, Any]]:
+    """
+    Iterate all channel slots on the device and return initialised ones.
+
+    Reads up to ``_MAX_CHANNEL_SLOTS`` indices; empty/uninitialised slots are
+    skipped.  Stops early if the device returns ERROR (no more slots).
+    """
+    channels: list[dict[str, Any]] = []
+
+    for idx in range(_MAX_CHANNEL_SLOTS):
+        try:
+            event = await meshcore.commands.get_channel(idx)
+        except Exception as exc:
+            logger.warning("Error fetching channel %d: %s", idx, exc)
+            break
+
+        if event is None or event.type == EventType.ERROR:
+            break
+
+        payload = event.payload
+        secret_raw = payload.get("channel_secret", b"")
+        secret_hex = (
+            secret_raw.hex()
+            if isinstance(secret_raw, (bytes, bytearray))
+            else str(secret_raw)
+        )
+        name = payload.get("channel_name", "")
+
+        if _is_empty_slot(name, secret_hex):
+            continue
+
+        channels.append(
+            {
+                "index": payload.get("channel_idx", idx),
+                "name": name,
+                "secret_hex": secret_hex,
+            }
+        )
+
+    return channels
+
+
+# ── Routes ────────────────────────────────────────────────────────────────────
+
+
 @router.get("/api/channels", response_model=ChannelsResponse)
 async def get_channels(
     _email: str = Depends(require_token),
@@ -53,12 +112,10 @@ async def get_channels(
     Return the list of channels configured on the connected MeshCore companion
     device.
 
-    Iterates channel indices 0 – 7 and stops as soon as the device responds
-    with an error (indicating no more channels are configured).
+    Iterates channel indices 0 – 7; uninitialised slots are omitted.
 
     - **401** — invalid or missing ``x-api-token``.
     - **502** — device connection failed.
-    - **504** — device did not respond to the channel query.
 
     Example response:
 
@@ -88,7 +145,86 @@ async def get_channels(
                 },
             ) from exc
 
-        channels: list[dict[str, Any]] = []
+        channels = await _fetch_all_channels(meshcore)
+
+        if not channels:
+            logger.info("No channels found on the connected device")
+
+        return ChannelsResponse(
+            status="ok",
+            channels=[ChannelInfo(**ch) for ch in channels],
+        )
+
+    finally:
+        if meshcore:
+            try:
+                await asyncio.wait_for(meshcore.disconnect(), timeout=5)
+            except Exception:
+                pass
+
+
+@router.post("/api/channels", response_model=ChannelsResponse, status_code=201)
+async def create_channel(
+    payload: CreateChannelRequest,
+    _email: str = Depends(require_token),
+) -> ChannelsResponse:
+    """
+    Create a new channel on the next free slot of the connected MeshCore
+    companion device.
+
+    The channel secret is derived automatically from the name (SHA-256 of the
+    name, first 16 bytes — the same algorithm used by MeshCore firmware).
+
+    - **400** — no free slot available (all 8 slots are occupied).
+    - **409** — a channel with the same name already exists.
+    - **401** — invalid or missing ``x-api-token``.
+    - **502** — device connection failed.
+    - **504** — device did not acknowledge the write.
+
+    Example request:
+
+    ```json
+    { "name": "MyChannel" }
+    ```
+
+    Example response (201):
+
+    ```json
+    {
+      "status": "ok",
+      "channels": [
+        { "index": 0, "name": "General",   "secret_hex": "0a1b2c..." },
+        { "index": 1, "name": "MyChannel", "secret_hex": "ff00aa..." }
+      ]
+    }
+    ```
+    """
+    channel_name = payload.name.strip()
+    if not channel_name:
+        raise HTTPException(
+            status_code=400,
+            detail={"status": "error", "message": "Channel name must not be empty"},
+        )
+
+    config = telemetry_common.load_config()
+    meshcore = None
+
+    try:
+        try:
+            meshcore = await telemetry_common.connect_to_device(config, verbose=False)
+        except Exception as exc:
+            logger.error("Failed to connect to MeshCore device: %s", exc)
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "status": "error",
+                    "message": f"Device connection failed: {exc}",
+                },
+            ) from exc
+
+        # Read all slots (initialised and raw) to find duplicates and free slots.
+        existing: list[dict[str, Any]] = []
+        free_slot: int | None = None
 
         for idx in range(_MAX_CHANNEL_SLOTS):
             try:
@@ -98,34 +234,76 @@ async def get_channels(
                 break
 
             if event is None or event.type == EventType.ERROR:
-                # No more channels configured at this index
                 break
 
-            payload = event.payload
-            secret_raw = payload.get("channel_secret", b"")
-            # channel_secret may arrive as bytes or already hex-encoded str
-            if isinstance(secret_raw, (bytes, bytearray)):
-                secret_hex = secret_raw.hex()
-            else:
-                secret_hex = str(secret_raw)
+            slot_payload = event.payload
+            secret_raw = slot_payload.get("channel_secret", b"")
+            secret_hex = (
+                secret_raw.hex()
+                if isinstance(secret_raw, (bytes, bytearray))
+                else str(secret_raw)
+            )
+            name = slot_payload.get("channel_name", "")
 
-            name = payload.get("channel_name", "")
-            # Skip uninitialised slots: empty name + all-zero secret
-            if not name and all(b == "0" for b in secret_hex):
+            if _is_empty_slot(name, secret_hex):
+                # First uninitialised slot becomes the target
+                if free_slot is None:
+                    free_slot = idx
                 continue
 
-            channels.append(
+            # Duplicate name check (case-insensitive)
+            if name.lower() == channel_name.lower():
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "status": "error",
+                        "message": f"Channel '{name}' already exists at index {idx}",
+                    },
+                )
+
+            existing.append(
                 {
-                    "index": payload.get("channel_idx", idx),
+                    "index": slot_payload.get("channel_idx", idx),
                     "name": name,
                     "secret_hex": secret_hex,
                 }
             )
 
-        if not channels and _MAX_CHANNEL_SLOTS > 0:
-            # Connected successfully but got nothing — treat as empty list, not
-            # an error (the device may genuinely have no channels configured).
-            logger.info("No channels found on the connected device")
+        if free_slot is None:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "status": "error",
+                    "message": "No free channel slot available (all 8 slots are occupied)",
+                },
+            )
+
+        # Write the new channel — secret auto-derived from name by the library
+        logger.info("Creating channel '%s' at slot %d", channel_name, free_slot)
+        try:
+            result = await meshcore.commands.set_channel(free_slot, channel_name)
+        except Exception as exc:
+            logger.error("set_channel failed: %s", exc)
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "status": "error",
+                    "message": f"Failed to write channel: {exc}",
+                },
+            ) from exc
+
+        if result is None or result.type == EventType.ERROR:
+            err_msg = result.payload if result else "no response"
+            raise HTTPException(
+                status_code=504,
+                detail={
+                    "status": "error",
+                    "message": f"Device did not acknowledge channel creation: {err_msg}",
+                },
+            )
+
+        # Re-read the full channel list so the response reflects device state
+        channels = await _fetch_all_channels(meshcore)
 
         return ChannelsResponse(
             status="ok",
