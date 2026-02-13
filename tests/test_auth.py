@@ -2,7 +2,7 @@
 Tests for POST /api/login endpoint.
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import bcrypt
 from fastapi.testclient import TestClient
@@ -28,8 +28,21 @@ def _mock_client(rows: list) -> MagicMock:
 
 def test_login_success():
     """Returns 200 and user details when credentials are valid."""
-    with patch(
-        "app.api.routes.auth.get_client", return_value=_mock_client(_ACTIVE_ROW)
+    mock_result = MagicMock()
+    mock_result.type = MagicMock()
+    mock_result.payload = {"name": "test-device"}
+
+    mock_meshcore = MagicMock()
+    mock_meshcore.commands.send_appstart = AsyncMock(return_value=mock_result)
+    mock_meshcore.disconnect = AsyncMock()
+
+    with (
+        patch("app.api.routes.auth.get_client", return_value=_mock_client(_ACTIVE_ROW)),
+        patch(
+            "app.api.routes.auth.telemetry_common.connect_to_device",
+            new_callable=AsyncMock,
+            return_value=mock_meshcore,
+        ),
     ):
         response = client.post(
             "/api/login", json={"email": "alice@example.com", "password": "secret"}
@@ -40,6 +53,7 @@ def test_login_success():
     assert body["email"] == "alice@example.com"
     assert body["username"] == "alice"
     assert body["access_rights"] == ""
+    assert body["device_name"] == "test-device"
     assert isinstance(body["token"], str) and len(body["token"]) == 64
 
 

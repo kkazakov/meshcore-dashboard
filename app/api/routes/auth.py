@@ -6,6 +6,7 @@ Tokens are random, opaque strings stored only in the process-level
 or a database and are lost on server restart.
 """
 
+import asyncio
 import logging
 import secrets
 
@@ -14,13 +15,13 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app.db.clickhouse import get_client
+from app.meshcore import telemetry_common
+from meshcore import EventType
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# In-memory token store: { token: email }
-# Kept at module level so it lives for the lifetime of the process only.
 _token_store: dict[str, str] = {}
 
 
@@ -34,10 +35,11 @@ class LoginResponse(BaseModel):
     email: str
     username: str
     access_rights: str
+    device_name: str
 
 
 @router.post("/api/login", response_model=LoginResponse)
-def login(payload: LoginRequest) -> LoginResponse:
+async def login(payload: LoginRequest) -> LoginResponse:
     """
     Authenticate a user by email and password.
 
@@ -82,9 +84,27 @@ def login(payload: LoginRequest) -> LoginResponse:
     _token_store[token] = payload.email
     logger.info("Issued token for %s", payload.email)
 
+    device_name = ""
+    meshcore = None
+    try:
+        config = telemetry_common.load_config()
+        meshcore = await telemetry_common.connect_to_device(config, verbose=False)
+        result = await meshcore.commands.send_appstart()
+        if result and result.type != EventType.ERROR:
+            device_name = result.payload.get("name", "")
+    except Exception as exc:
+        logger.warning("Failed to get device name during login: %s", exc)
+    finally:
+        if meshcore:
+            try:
+                await asyncio.wait_for(meshcore.disconnect(), timeout=5)
+            except Exception:
+                pass
+
     return LoginResponse(
         token=token,
         email=payload.email,
         username=username,
         access_rights=access_rights,
+        device_name=device_name,
     )
