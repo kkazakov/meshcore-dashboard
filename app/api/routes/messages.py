@@ -51,8 +51,8 @@ Responses
 
 import asyncio
 import logging
-from datetime import datetime
-from typing import Literal
+from datetime import datetime, timezone
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -104,6 +104,54 @@ class GetMessagesResponse(BaseModel):
 def _strip_hash(channel: str) -> str:
     """Remove a leading ``#`` from a channel name, if present."""
     return channel.lstrip("#")
+
+
+async def _get_device_name(meshcore) -> str:
+    """Fetch the device's own name via send_appstart()."""
+    try:
+        result = await meshcore.commands.send_appstart()
+        if result and result.type != EventType.ERROR:
+            return result.payload.get("name", "")
+    except Exception as exc:
+        logger.warning("Failed to get device name: %s", exc)
+    return ""
+
+
+def _insert_sent_message(row: dict[str, Any]) -> None:
+    """Insert an outgoing message into ClickHouse (runs in a thread)."""
+    client = get_client()
+    column_names = [
+        "received_at",
+        "msg_type",
+        "channel_idx",
+        "channel_name",
+        "sender_timestamp",
+        "sender_pubkey_prefix",
+        "sender_name",
+        "path_len",
+        "snr",
+        "text",
+        "txt_type",
+        "signature",
+    ]
+    data = [
+        [
+            row["received_at"],
+            row["msg_type"],
+            row["channel_idx"],
+            row["channel_name"],
+            row["sender_timestamp"],
+            row["sender_pubkey_prefix"],
+            row["sender_name"],
+            row["path_len"],
+            row["snr"],
+            row["text"],
+            row["txt_type"],
+            row["signature"],
+        ]
+    ]
+    client.insert("messages", data, column_names=column_names)
+    logger.debug("Inserted sent message into ClickHouse")
 
 
 async def _resolve_channel_index(meshcore, channel_name: str) -> tuple[int, str]:
@@ -205,6 +253,7 @@ async def send_message(
                 ) from exc
 
             chan_idx, chan_name = await _resolve_channel_index(meshcore, channel_name)
+            device_name = await _get_device_name(meshcore)
 
             logger.info(
                 "Sending message to channel '%s' (slot %d): %r",
@@ -246,6 +295,25 @@ async def send_message(
                         "message": f"Device rejected the message: {err_msg}",
                     },
                 )
+
+            sent_row = {
+                "received_at": datetime.now(timezone.utc),
+                "msg_type": "CHAN",
+                "channel_idx": chan_idx,
+                "channel_name": chan_name,
+                "sender_timestamp": int(datetime.now(timezone.utc).timestamp()),
+                "sender_pubkey_prefix": "",
+                "sender_name": device_name,
+                "path_len": 0,
+                "snr": 0.0,
+                "text": message_text,
+                "txt_type": 0,
+                "signature": "",
+            }
+            try:
+                await asyncio.to_thread(_insert_sent_message, sent_row)
+            except Exception as exc:
+                logger.warning("Failed to store sent message in ClickHouse: %s", exc)
 
             return SendMessageResponse(
                 status="ok",
