@@ -137,7 +137,7 @@ All endpoints that require authentication expect an `x-api-token` header obtaine
 
 **Response**
 ```json
-{ "token": "abc123…", "email": "admin", "username": "admin", "access_rights": "" }
+{ "token": "abc123…", "email": "admin", "username": "admin", "access_rights": "", "device_name": "MyNode" }
 ```
 
 ---
@@ -147,8 +147,11 @@ All endpoints that require authentication expect an `x-api-token` header obtaine
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | `GET` | `/api/telemetry` | x-api-token | Fetch live telemetry from a MeshCore repeater |
+| `GET` | `/api/telemetry/history/{repeater_id}` | x-api-token | Fetch historical telemetry for a repeater |
 
-**Query parameters** (at least one required)
+#### GET /api/telemetry — live telemetry
+
+**Query parameters** (at least one of `repeater_name` / `public_key` required)
 
 | Parameter | Description |
 |---|---|
@@ -172,6 +175,44 @@ All endpoints that require authentication expect an `x-api-token` header obtaine
   }
 }
 ```
+
+#### GET /api/telemetry/history/{repeater_id} — historical telemetry
+
+Returns stored telemetry data points for a repeater from ClickHouse.
+
+**Path parameter**
+
+| Parameter | Description |
+|---|---|
+| `repeater_id` | UUID of the monitored repeater |
+
+**Query parameters** (`keys` is required)
+
+| Parameter | Description |
+|---|---|
+| `keys` | Comma-separated list of metric keys to return (e.g. `battery_voltage,battery_percentage`) |
+| `from` | Start of the time range (ISO 8601, optional) |
+| `to` | End of the time range (ISO 8601, optional) |
+
+**Response**
+```json
+{
+  "data": {
+    "battery_voltage": [
+      { "date": "2026-02-13T12:00:00Z", "value": "3.95" }
+    ],
+    "battery_percentage": [
+      { "date": "2026-02-13T12:00:00Z", "value": "75.0" }
+    ]
+  }
+}
+```
+
+| Code | Reason |
+|---|---|
+| `200` | Success |
+| `400` | `keys` parameter not provided |
+| `401` | Missing / invalid token |
 
 ---
 
