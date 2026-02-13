@@ -14,6 +14,7 @@ from fastapi import FastAPI
 
 from app.api.routes import auth as auth_router
 from app.api.routes import channels as channels_router
+from app.api.routes import messages as messages_router
 from app.api.routes import status as status_router
 from app.api.routes import telemetry as telemetry_router
 from app.workers.message_poller import run_message_poller
@@ -26,9 +27,40 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+class _MeshcoreNoiseFilter(logging.Filter):
+    """Drop known high-frequency INFO lines emitted by the meshcore library.
+
+    MeshCore resets its own logger level to INFO on every connection, so
+    setLevel(WARNING) is overwritten each poll cycle.  A filter on the root
+    handler is the only reliable way to suppress these without modifying the
+    library.
+    """
+
+    _SUPPRESSED = frozenset(
+        [
+            "TCP Connection started",
+            "TCP Connection closed",
+            "connection established",
+            "Connected successfully:",
+        ]
+    )
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not (
+            record.name == "meshcore" and record.getMessage() in self._SUPPRESSED
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Start background workers on startup; cancel them on shutdown."""
+    # Attach a filter to every root handler to suppress meshcore connection
+    # chatter.  We can't use setLevel() because MeshCore resets its own logger
+    # to INFO on every instantiation.
+    _filter = _MeshcoreNoiseFilter()
+    for handler in logging.root.handlers:
+        handler.addFilter(_filter)
+
     poller_task = asyncio.create_task(run_message_poller(), name="message_poller")
     logger.info("Background message poller started")
     try:
@@ -54,3 +86,4 @@ app.include_router(status_router.router, tags=["health"])
 app.include_router(auth_router.router, tags=["auth"])
 app.include_router(telemetry_router.router, tags=["telemetry"])
 app.include_router(channels_router.router, tags=["messaging"])
+app.include_router(messages_router.router, tags=["messaging"])
