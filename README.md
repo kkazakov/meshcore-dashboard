@@ -1,6 +1,6 @@
-# Meshcore Dashboard
+# Meshcore Dashboard API
 
-A self-hosted dashboard for managing and monitoring local [MeshCore](https://github.com/ripplebiz/MeshCore) devices.
+A self-hosted dashboard API for managing and monitoring local [MeshCore](https://github.com/ripplebiz/MeshCore) devices.
 
 ## Goal
 
