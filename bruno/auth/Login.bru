@@ -12,7 +12,7 @@ post {
 
 body:json {
   {
-    "email": "admin",
+    "email": "admin@example.com",
     "password": "admin"
   }
 }
@@ -31,15 +31,15 @@ tests {
   test("status 200", function() {
     expect(res.status).to.equal(200);
   });
-
+  
   test("token is present and non-empty", function() {
     expect(res.body.token).to.be.a("string").and.to.have.length.greaterThan(0);
   });
-
+  
   test("email returned matches login", function() {
     expect(res.body.email).to.equal("admin");
   });
-
+  
   test("username present", function() {
     expect(res.body.username).to.be.a("string");
   });
