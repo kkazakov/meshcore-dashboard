@@ -1,0 +1,48 @@
+meta {
+  name: Add Repeater
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{base_url}}/api/repeaters
+  body: json
+  auth: none
+}
+
+headers {
+  x-api-token: {{auth_token}}
+}
+
+body:json {
+  {
+    "name": "{{repeater_name}}",
+    "public_key": "{{public_key}}"
+  }
+}
+
+tests {
+  test("status 201", function() {
+    expect(res.status).to.equal(201);
+  });
+  
+  test("envelope status is ok", function() {
+    expect(res.body.status).to.equal("ok");
+  });
+  
+  test("repeater object present", function() {
+    expect(res.body.repeater).to.be.an("object");
+  });
+  
+  test("repeater has id", function() {
+    expect(res.body.repeater).to.have.property("id");
+  });
+  
+  test("repeater has name", function() {
+    expect(res.body.repeater.name).to.equal(env.vars.repeater_name);
+  });
+  
+  test("repeater is enabled by default", function() {
+    expect(res.body.repeater.enabled).to.equal(true);
+  });
+}

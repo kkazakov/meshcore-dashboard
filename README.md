@@ -39,6 +39,12 @@ clickhouse-client --multiquery < sql/001_authentication.sql
 
 # 002 — messages store
 clickhouse-client --multiquery < sql/002_messages.sql
+
+# 003 — repeaters to monitor
+clickhouse-client --multiquery < sql/003_repeaters.sql
+
+# 004 — repeater telemetry store
+clickhouse-client --multiquery < sql/004_repeater_telemetry.sql
 ```
 
 Or via the Python client (adjust credentials as needed):
@@ -48,6 +54,8 @@ import clickhouse_connect
 client = clickhouse_connect.get_client(host="localhost", username="admin", password="...")
 client.command(open("sql/001_authentication.sql").read())
 client.command(open("sql/002_messages.sql").read())
+client.command(open("sql/003_repeaters.sql").read())
+client.command(open("sql/004_repeater_telemetry.sql").read())
 ```
 
 ---
@@ -95,6 +103,7 @@ All settings are read from `.env` (see `.env.example` for the full template).
 |---|---|---|
 | `API_HOST` | `0.0.0.0` | Bind address |
 | `API_PORT` | `8000` | Listen port |
+| `REPEATER_POLL_INTERVAL` | `600` | Interval (seconds) for repeater telemetry polling |
 
 ---
 
@@ -163,6 +172,49 @@ All endpoints that require authentication expect an `x-api-token` header obtaine
   }
 }
 ```
+
+---
+
+### Repeater Monitoring
+
+Manage repeaters to be monitored for periodic telemetry collection.
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/api/repeaters` | x-api-token | List all monitored repeaters |
+| `POST` | `/api/repeaters` | x-api-token | Add a repeater for monitoring |
+| `DELETE` | `/api/repeaters/{id}` | x-api-token | Delete a repeater |
+| `POST` | `/api/repeaters/{id}/enable` | x-api-token | Enable monitoring for a repeater |
+| `POST` | `/api/repeaters/{id}/disable` | x-api-token | Disable monitoring for a repeater |
+
+**GET /api/repeaters — response**
+```json
+{
+  "status": "ok",
+  "repeaters": [
+    {
+      "id": "550e8400-e29b-41d4-a716-446655440000",
+      "name": "Vardar repeater",
+      "public_key": "df33c12f828cdf387e62201945aa3d10e927db593b8098b1bfad92e122994f9a",
+      "enabled": true,
+      "created_at": "2026-02-13T12:00:00.000000+00:00"
+    }
+  ]
+}
+```
+
+**POST /api/repeaters — request**
+```json
+{ "name": "Vardar repeater", "public_key": "df33c12f828c...", "password": "optional" }
+```
+Returns `201` with the created repeater object.
+Returns `409` if a repeater with the same public_key already exists.
+
+**DELETE /api/repeaters/{id}**
+Returns `200` on success, `404` if not found.
+
+**POST /api/repeaters/{id}/enable** and **POST /api/repeaters/{id}/disable**
+Returns `200` on success, `404` if not found.
 
 ---
 
@@ -324,6 +376,40 @@ Runs automatically on server startup as an `asyncio` background task.
 | `text` | `String` | Message body |
 | `txt_type` | `UInt8` | Protocol type flag (0 = plain, 2 = signed) |
 | `signature` | `String` | 4-byte hex signature (PRIV signed only) |
+
+### Repeater Telemetry Poller (`app/workers/repeater_telemetry_poller.py`)
+
+Runs automatically on server startup as an `asyncio` background task.
+
+**What it does:**
+- Queries the `repeaters` table for all enabled repeaters
+- At a configurable interval (default: **600 seconds / 10 minutes**), fetches telemetry from each repeater
+- Stores battery metrics in the `repeater_telemetry` ClickHouse table as key-value pairs
+
+**Resilience:**
+- Uses the global `device_lock` to avoid conflicts with API routes and the message poller
+- Exponential back-off on connection failures (2 s → 4 s → … capped at 60 s)
+
+**Repeaters table columns:**
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | `UUID` | Unique identifier |
+| `name` | `String` | Repeater display name |
+| `public_key` | `String` | Repeater public key |
+| `password` | `String` | Optional device password |
+| `enabled` | `Bool` | Whether monitoring is active |
+| `created_at` | `DateTime64(3, 'UTC')` | Creation timestamp |
+
+**Repeater telemetry table columns:**
+
+| Column | Type | Description |
+|---|---|---|
+| `recorded_at` | `DateTime64(3, 'UTC')` | Server ingest timestamp |
+| `repeater_id` | `UUID` | Foreign key to repeater |
+| `repeater_name` | `String` | Repeater name (denormalized) |
+| `metric_key` | `LowCardinality(String)` | Metric name (`battery_voltage`, `battery_percentage`) |
+| `metric_value` | `Float64` | Metric value |
 
 ---
 
