@@ -1,0 +1,47 @@
+meta {
+  name: Get Telemetry History
+  type: http
+  seq: 3
+}
+
+get {
+  url: {{base_url}}/api/telemetry/history/{{repeater_id}}?from=2025-02-10 00:00:00&to=2025-02-14 00:00:00&keys=battery_voltage,battery_percentage
+  body: none
+  auth: none
+}
+
+params:query {
+  from: 2025-02-10 00:00:00
+  to: 2025-02-14 00:00:00
+  keys: battery_voltage,battery_percentage
+}
+
+headers {
+  x-api-token: {{auth_token}}
+}
+
+tests {
+  test("status 200", function() {
+    expect(res.status).to.equal(200);
+  });
+  
+  test("response has data object", function() {
+    expect(res.body.data).to.be.an("object");
+  });
+  
+  test("battery_voltage is an array", function() {
+    expect(res.body.data.battery_voltage).to.be.an("array");
+  });
+  
+  test("battery_percentage is an array", function() {
+    expect(res.body.data.battery_percentage).to.be.an("array");
+  });
+  
+  test("each data point has date and value", function() {
+    const points = res.body.data.battery_voltage;
+    if (points.length > 0) {
+      expect(points[0]).to.have.property("date");
+      expect(points[0]).to.have.property("value");
+    }
+  });
+}
