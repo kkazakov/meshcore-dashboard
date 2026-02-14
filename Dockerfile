@@ -1,23 +1,61 @@
-FROM python:3.12-slim
+# ── Stage 1: dependency builder ────────────────────────────────────────────────
+FROM python:3.12-slim AS builder
 
-# Prevents Python from writing .pyc files and buffers stdout/stderr
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
+WORKDIR /build
+
+# Install build-time system deps required by some Python packages (e.g. bleak/dbus)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        gcc \
+        libdbus-1-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create an isolated venv so only it needs to be copied to the runtime stage
+RUN python -m venv /venv
+ENV PATH="/venv/bin:$PATH"
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip \
+ && pip install --no-cache-dir -r requirements.txt
+
+
+# ── Stage 2: minimal runtime image ─────────────────────────────────────────────
+FROM python:3.12-slim AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/venv/bin:$PATH"
+
+# Runtime-only system libs (dbus needed by bleak at runtime)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libdbus-1-3 \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
-# Install dependencies first (layer-cached unless requirements.txt changes)
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Copy venv from builder (no pip / compiler in final image)
+COPY --from=builder /venv /venv
 
 # Copy application source
 COPY app/ ./app/
 COPY sql/ ./sql/
 
+# Bake the .env into the image (production config is part of the build)
+COPY .env ./.env
+
 # Non-root user for security
-RUN adduser --disabled-password --gecos "" appuser && chown -R appuser /app
+RUN adduser --disabled-password --gecos "" appuser \
+ && chown -R appuser /app
 USER appuser
 
-EXPOSE 8000
+EXPOSE 8080
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Production: multiple workers, no reload, no access log noise
+CMD ["uvicorn", "app.main:app", \
+     "--host", "0.0.0.0", \
+     "--port", "8080", \
+     "--workers", "2", \
+     "--no-access-log", \
+     "--no-use-colors"]
