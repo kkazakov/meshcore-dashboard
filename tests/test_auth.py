@@ -57,12 +57,35 @@ def test_login_success():
     assert isinstance(body["token"], str) and len(body["token"]) == 64
 
 
-def test_login_success_stores_token_in_memory():
-    """Each successful login mints a unique token stored in the module-level dict."""
-    import app.api.routes.auth as auth_module
+def test_login_success_stores_token():
+    """Each successful login mints a unique token stored in ClickHouse."""
+    inserted_tokens: list[str] = []
 
-    with patch(
-        "app.api.routes.auth.get_client", return_value=_mock_client(_ACTIVE_ROW)
+    def capture_insert(table, data, column_names=None):
+        if data and isinstance(data, list):
+            for row in data:
+                if row and len(row) > 0:
+                    inserted_tokens.append(row[0])
+        return None
+
+    mock_ch = _mock_client(_ACTIVE_ROW)
+    mock_ch.insert = MagicMock(side_effect=capture_insert)
+
+    mock_result = MagicMock()
+    mock_result.type = MagicMock()
+    mock_result.payload = {"name": "test-device"}
+
+    mock_meshcore = MagicMock()
+    mock_meshcore.commands.send_appstart = AsyncMock(return_value=mock_result)
+    mock_meshcore.disconnect = AsyncMock()
+
+    with (
+        patch("app.api.routes.auth.get_client", return_value=mock_ch),
+        patch(
+            "app.api.routes.auth.telemetry_common.connect_to_device",
+            new_callable=AsyncMock,
+            return_value=mock_meshcore,
+        ),
     ):
         r1 = client.post(
             "/api/login", json={"email": "alice@example.com", "password": "secret"}
@@ -74,8 +97,8 @@ def test_login_success_stores_token_in_memory():
     t1 = r1.json()["token"]
     t2 = r2.json()["token"]
     assert t1 != t2
-    assert t1 in auth_module._token_store
-    assert t2 in auth_module._token_store
+    assert t1 in inserted_tokens
+    assert t2 in inserted_tokens
 
 
 def test_login_wrong_password():

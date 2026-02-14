@@ -2,13 +2,31 @@
 Tests for GET /status endpoint.
 """
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+from contextlib import contextmanager
 
 from fastapi.testclient import TestClient
 
 from app.main import app
 
 client = TestClient(app)
+
+
+def _mock_token_client(valid: bool = True) -> MagicMock:
+    """Create a mock ClickHouse client for token validation."""
+    mock_result = MagicMock()
+    mock_result.result_rows = [["test@example.com"]] if valid else []
+    mock_ch = MagicMock()
+    mock_ch.query.return_value = mock_result
+    return mock_ch
+
+
+@contextmanager
+def _mock_tokens_table(valid: bool = True):
+    """Context manager that mocks the tokens table."""
+    mock_client = _mock_token_client(valid)
+    with patch("app.api.routes.status.get_client", return_value=mock_client):
+        yield
 
 
 def test_status_ok():
@@ -38,10 +56,9 @@ def test_status_degraded():
 
 def test_status_authenticated_with_valid_token():
     """Returns authenticated=true when a valid session token is supplied."""
-    fake_store = {"validtoken123": "user@example.com"}
     with (
         patch("app.api.routes.status.ping", return_value=(True, 1.0)),
-        patch("app.api.routes.status._token_store", fake_store),
+        _mock_tokens_table(valid=True),
     ):
         response = client.get("/status", headers={"x-api-token": "validtoken123"})
 
@@ -51,10 +68,9 @@ def test_status_authenticated_with_valid_token():
 
 def test_status_not_authenticated_with_wrong_token():
     """Returns authenticated=false when the token is not in the store."""
-    fake_store = {"validtoken123": "user@example.com"}
     with (
         patch("app.api.routes.status.ping", return_value=(True, 1.0)),
-        patch("app.api.routes.status._token_store", fake_store),
+        _mock_tokens_table(valid=False),
     ):
         response = client.get("/status", headers={"x-api-token": "wrongtoken"})
 

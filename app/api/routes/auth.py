@@ -1,14 +1,14 @@
 """
 POST /api/login — password-based authentication.
 
-Tokens are random, opaque strings stored only in the process-level
-``_token_store`` dict (email → token).  They are never persisted to disk
-or a database and are lost on server restart.
+Tokens are random, opaque strings stored in ClickHouse tokens table.
+They expire after 7 days of inactivity.
 """
 
 import asyncio
 import logging
 import secrets
+from datetime import datetime, timedelta, timezone
 
 import bcrypt
 from fastapi import APIRouter, HTTPException
@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-_token_store: dict[str, str] = {}
+TOKEN_TTL_DAYS = 7
 
 
 class LoginRequest(BaseModel):
@@ -81,8 +81,19 @@ async def login(payload: LoginRequest) -> LoginResponse:
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     token = secrets.token_hex(32)
-    _token_store[token] = payload.email
-    logger.info("Issued token for %s", payload.email)
+    expires_at = datetime.now(timezone.utc) + timedelta(days=TOKEN_TTL_DAYS)
+
+    try:
+        client.insert(
+            "tokens",
+            [[token, payload.email, expires_at, expires_at]],
+            column_names=["token", "email", "created_at", "expires_at"],
+        )
+    except Exception as exc:
+        logger.error("Failed to store token in ClickHouse: %s", exc)
+        raise HTTPException(status_code=503, detail="Database unavailable") from exc
+
+    logger.info("Issued token for %s (expires %s)", payload.email, expires_at)
 
     device_name = ""
     meshcore = None

@@ -25,24 +25,24 @@ tests {
   test("status 200", function() {
     expect(res.status).to.equal(200);
   });
-
+  
   test("channel field matches request", function() {
     expect(res.body.channel).to.equal("Public");
   });
-
+  
   test("count is a non-negative integer", function() {
     expect(res.body.count).to.be.a("number");
     expect(res.body.count).to.be.at.least(0);
   });
-
+  
   test("messages is an array", function() {
     expect(res.body.messages).to.be.an("array");
   });
-
+  
   test("count matches messages array length", function() {
     expect(res.body.count).to.equal(res.body.messages.length);
   });
-
+  
   test("each message has required fields", function() {
     res.body.messages.forEach(function(msg) {
       expect(msg).to.have.property("ts");
